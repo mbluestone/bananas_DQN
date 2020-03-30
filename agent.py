@@ -42,6 +42,59 @@ class Agent():
         self.memory = ReplayBuffer(action_size, BUFFER_SIZE, BATCH_SIZE, seed)
         # Initialize time step (for updating every UPDATE_EVERY steps)
         self.t_step = 0
+        
+    def train(self,env,n_episodes=1000, max_t=1000, eps_start=1.0, eps_end=0.01, eps_decay=0.995):
+        """Deep Q-Learning.
+
+        Params
+        ======
+            env (UnityEnvironment): Bananas environment
+            n_episodes (int): maximum number of training episodes
+            max_t (int): maximum number of timesteps per episode
+            eps_start (float): starting value of epsilon, for epsilon-greedy action selection
+            eps_end (float): minimum value of epsilon
+            eps_decay (float): multiplicative factor (per episode) for decreasing epsilon
+        """
+        # get the default brain
+        brain_name = env.brain_names[0]
+        brain = env.brains[brain_name]
+        # list containing scores from each episode
+        scores = []   
+        # last 100 scores
+        scores_window = deque(maxlen=100) 
+        # initialize epsilon
+        eps = eps_start                    
+        for i_episode in range(1, n_episodes+1):
+            env_info = env.reset(train_mode=True)[brain_name]
+            state = env_info.vector_observations[0]
+            score = 0
+            for t in range(max_t):
+                action = self.act(state, eps)
+                env_info = env.step(action)[brain_name]
+                # get the next state
+                next_state = env_info.vector_observations[0]
+                # get the reward
+                reward = env_info.rewards[0] 
+                # see if episode has finished
+                done = env_info.local_done[0]
+                self.step(state, action, reward, next_state, done)
+                state = next_state
+                score += reward
+                if done:
+                    break 
+            # save most recent score
+            scores_window.append(score)       
+            scores.append(score)
+            # decrease epsilon
+            eps = max(eps_end, eps_decay*eps) 
+            print('\rEpisode {}\tAverage Score: {:.2f}'.format(i_episode, np.mean(scores_window)), end="")
+            if i_episode % 100 == 0:
+                print('\rEpisode {}\tAverage Score: {:.2f}'.format(i_episode, np.mean(scores_window)))
+            if np.mean(scores_window)>=13.0:
+                print('\nEnvironment solved in {:d} episodes!\tAverage Score: {:.2f}'.format(i_episode-100, np.mean(scores_window)))
+                torch.save(self.qnetwork_local.state_dict(), 'checkpoint.pth')
+                break
+        return scores
     
     def step(self, state, action, reward, next_state, done):
         # Save experience in replay memory
@@ -156,3 +209,35 @@ class ReplayBuffer:
     def __len__(self):
         """Return the current size of internal memory."""
         return len(self.memory)
+    
+class Agent_DoubleDQN(Agent):
+    """DQN Agent with Double DQN implemented."""
+    
+    def learn(self, experiences, gamma):
+        """Update value parameters using given batch of experience tuples.
+
+        Params
+        ======
+            experiences (Tuple[torch.Tensor]): tuple of (s, a, r, s', done) tuples 
+            gamma (float): discount factor
+        """
+        states, actions, rewards, next_states, dones = experiences
+
+        # Get predicted Q values (for next actions chosen by local model) from target model
+        next_actions = self.qnetwork_local(next_states).detach().max(1)[1]
+        Q_targets_next = self.qnetwork_target(next_states).detach().unsqueeze(1)[next_actions]
+        # Compute Q targets for current states 
+        Q_targets = rewards + (gamma * Q_targets_next * (1 - dones))
+
+        # Get expected Q values from local model
+        Q_expected = self.qnetwork_local(states).gather(1, actions)
+
+        # Compute loss
+        loss = F.mse_loss(Q_expected, Q_targets)
+        # Minimize the loss
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        # ------------------- update target network ------------------- #
+        self.soft_update(self.qnetwork_local, self.qnetwork_target, TAU)
