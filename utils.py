@@ -1,8 +1,15 @@
+import torch
+import numpy as np
+import random
+from collections import namedtuple, deque
+
 '''
 Helper classes for DQN Agent
 
 Prioritized Experience Replay code adapted from https://github.com/rlcode/per
 '''
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 class ReplayBuffer:
     """Fixed-size buffer to store experience tuples."""
@@ -61,52 +68,72 @@ class PrioritizedReplayBuffer:
         self.action_size = action_size
         self.memory = SumTree(buffer_size)  
         self.batch_size = batch_size
-        self.experience = namedtuple("Experience", field_names=["state", "action", "reward", "next_state", "done"])
         self.seed = random.seed(seed)
         self.e = 0.01
-        self.a = 0.6
-        self.beta = 0.4
-        self.beta_increment_per_sampling = 0.001
+        self.a = 0.2
+        self.beta = 0.01
+        self.beta_increment_per_sampling = 0.00003
 
     def add(self, error, sample):
         p = (np.abs(error) + self.e) ** self.a
-        self.tree.add(p, sample)
+        self.memory.add(p, sample)
 
     def sample(self):
-        batch = []
+        batch = np.array([])
         idxs = []
-        segment = self.tree.total() / self.batch_size
+        segment = self.memory.total() / self.batch_size
         priorities = []
 
         self.beta = np.min([1., self.beta + self.beta_increment_per_sampling])
 
-        for i in range(self.batch_size):
+        i=0
+        while len(priorities)< self.batch_size:
             a = segment * i
             b = segment * (i + 1)
 
             s = random.uniform(a, b)
-            (idx, p, data) = self.tree.get(s)
+            (idx, p, data) = self.memory.get(s)
+            if isinstance(data,int):
+                continue
             priorities.append(p)
-            batch.append(data)
+            data = np.array(data)
+            if batch.shape[0]==0:
+                batch = data
+            else:
+                batch = np.vstack([batch,data])
             idxs.append(idx)
+            i +=1
+            
+        batch = np.array(batch).transpose()   
+         
+        #assert batch.shape == (5,self.batch_size), f"Wrong Batch Size: {batch.shape}"
+        states = torch.from_numpy(np.vstack(batch[0])).float().to(device)
+        actions = torch.from_numpy(np.vstack(batch[1])).long().to(device)
+        rewards = torch.from_numpy(np.vstack(batch[2])).float().to(device)
+        next_states = torch.from_numpy(np.vstack(batch[3])).float().to(device)
+        dones = torch.from_numpy(np.vstack(batch[4]).astype(np.uint8)).float().to(device)
 
-        sampling_probabilities = priorities / self.tree.total()
-        is_weight = np.power(self.tree.n_entries * sampling_probabilities, -self.beta)
+        sampling_probabilities = priorities / self.memory.total()
+        is_weight = np.power(self.memory.n_entries * sampling_probabilities, -self.beta)
         is_weight /= is_weight.max()
 
-        return batch, idxs, is_weight
+        return states, actions, rewards, next_states, dones, idxs, is_weight
 
-    def update(self, idx, error):
-        p = (np.abs(error) + self.e) ** self.a
-        self.tree.update(idx, p)
-        
+    def update(self, idxs, errors):
+        for idx, error in zip(idxs, errors):
+            p = (error + self.e) ** self.a
+            self.memory.update(idx, p)
+            
+    def __len__(self):
+        return self.memory.n_entries
+    
 # SumTree
 # a binary tree data structure where the parent’s value is the sum of its children
 class SumTree:
     def __init__(self, capacity):
         self.capacity = capacity
-        self.tree = numpy.zeros(2 * capacity - 1)
-        self.data = numpy.zeros(capacity, dtype=object)
+        self.tree = np.zeros(2 * capacity - 1)
+        self.data = np.zeros(capacity, dtype=object)
         self.n_entries = 0
         self.write=0
 
