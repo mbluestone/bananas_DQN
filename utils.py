@@ -2,7 +2,6 @@ import torch
 import numpy as np
 import random
 from collections import namedtuple, deque
-from scipy.special import softmax
 
 '''
 Helper classes for DQN Agent
