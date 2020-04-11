@@ -26,7 +26,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 class Agent():
     """Interacts with and learns from the environment."""
 
-    def __init__(self, state_size, action_size, seed=0, double_dqn=False, dueling=False, per=False):
+    def __init__(self, state_size, action_size, seed=0, double_dqn=False, dueling=False, per=False, per_args=(0.2,0.01,2e-5)):
         """Initialize an Agent object.
         
         Params
@@ -36,7 +36,8 @@ class Agent():
             seed (int): random seed
             double_dqn (bool): whether to implement Double DQN (default=False)
             dueling (bool): whether to implement Dueling DQN
-            per (bool): whether to implement Prioritized Experience Replay 
+            per (bool): whether to implement Prioritized Experience Replay
+            per_args (tuple): a,beta,beta_increment for PER
         """
         self.state_size = state_size
         self.action_size = action_size
@@ -64,7 +65,7 @@ class Agent():
 
         # Replay memory
         if self.per:
-            self.memory = PrioritizedReplayBuffer(action_size, BUFFER_SIZE, BATCH_SIZE, seed) 
+            self.memory = PrioritizedReplayBuffer(action_size, BUFFER_SIZE, BATCH_SIZE, seed, *per_args) 
         else:
             self.memory = ReplayBuffer(action_size, BUFFER_SIZE, BATCH_SIZE, seed)
         # Initialize time step (for updating every UPDATE_EVERY steps)
@@ -86,7 +87,9 @@ class Agent():
         brain_name = env.brain_names[0]
         brain = env.brains[brain_name]
         # list containing scores from each episode
-        scores = []   
+        scores = []
+        # list containing window averaged scores
+        avg_scores = []
         # last 100 scores
         scores_window = deque(maxlen=100) 
         # initialize epsilon
@@ -104,7 +107,7 @@ class Agent():
                 reward = env_info.rewards[0] 
                 # see if episode has finished
                 done = env_info.local_done[0]
-                self.step(state, action, reward, next_state, done)
+                self.step((state, action, reward, next_state, done))
                 state = next_state
                 score += reward
                 if done:
@@ -112,6 +115,7 @@ class Agent():
             # save most recent score
             scores_window.append(score)       
             scores.append(score)
+            avg_scores.append(np.mean(scores_window))
             # decrease epsilon
             eps = max(eps_end, eps_decay*eps) 
             print('\rEpisode {}\tAverage Score: {:.2f}'.format(i_episode, np.mean(scores_window)), end="")
@@ -121,43 +125,17 @@ class Agent():
                 print('\nEnvironment solved in {:d} episodes!\tAverage Score: {:.2f}'.format(i_episode-100, np.mean(scores_window)))
                 torch.save(self.qnetwork_local.state_dict(), f'./checkpoints/checkpoint{self.output_name}.pth')
                 break
-        return scores
+        return scores, avg_scores
     
-    def step(self, state, action, reward, next_state, done):
-        # Save experience in replay memory
-        state = torch.from_numpy(state).float().unsqueeze(0).to(device)
-        next_state = torch.from_numpy(next_state).float().unsqueeze(0).to(device)
-        # if using PER, get error
-        if self.per:
-            self.qnetwork_local.eval()
-            self.qnetwork_target.eval()
-            with torch.no_grad():
-                # if Double DQN
-                if self.double_dqn:
-                    # Get predicted Q values (for next actions chosen by local model) from target model
-                    next_action = self.qnetwork_local(next_state).detach().max(1)[1].unsqueeze(1)
-                    Q_target_next = self.qnetwork_target(next_state).gather(1,next_action)
-
-                else:
-                    # Get max predicted Q values (for next states) from target model
-                    Q_target_next = self.qnetwork_target(next_state).detach().max(1)[0].unsqueeze(1)
-
-                # Compute Q targets for current states 
-                Q_target = reward + (self.gamma * Q_target_next * (1 - done))
-
-                # Get expected Q values from local model
-                Q_expected = self.qnetwork_local(state).cpu().data.numpy().squeeze()[action]
-                
-            self.qnetwork_local.train()
-            self.qnetwork_target.train()
-            
-            error = abs(Q_expected - Q_target)
-            state = state.cpu().data.numpy()
-            next_state = next_state.cpu().data.numpy()
-            self.memory.add(error, (state, action, reward, next_state, done))
-            
-        else:
-            self.memory.add(state, action, reward, next_state, done)
+    def step(self, experience):
+        """Save experience in replay memory and learn.
+        
+        Params
+        ======
+            experience (tuple): (state, action, reward, next_state, done)
+        """
+        # save experience
+        self.memory.add(experience)
         
         # Learn every UPDATE_EVERY time steps.
         self.t_step = (self.t_step + 1) % UPDATE_EVERY
@@ -200,7 +178,10 @@ class Agent():
         # if Double DQN
         if self.double_dqn:
             # Get predicted Q values (for next actions chosen by local model) from target model
-            next_actions = self.qnetwork_local(next_states).detach().max(1)[1].unsqueeze(1)
+            self.qnetwork_local.eval()
+            with torch.no_grad():
+                next_actions = self.qnetwork_local(next_states).detach().max(1)[1].unsqueeze(1)
+            self.qnetwork_local.train()
             Q_targets_next = self.qnetwork_target(next_states).gather(1,next_actions)
         
         else:
